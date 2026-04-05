@@ -22,6 +22,7 @@ OTX_KEY = st.secrets.get("OTX_API_KEY", "")
 THREATFOX_KEY = st.secrets.get("THREATFOX_KEY", "")
 URLHAUS_KEY = st.secrets.get("URLHAUS_KEY", "")
 VT_KEY = st.secrets.get("VT_API_KEY", "")
+URLSCAN_KEY = st.secrets.get("URLSCAN_KEY", "")
 
 # ==========================================
 # --- DATA FETCHING FUNCTIONS ---
@@ -111,15 +112,11 @@ def fetch_apt_pulses(search_term="APT"):
 # ==========================================
 
 def check_indicator_type(indicator):
-    """Detects IPs, Domains, and Hashes (MD5, SHA1, SHA256)"""
     indicator = indicator.strip()
-    # Check for Hash
     if re.match(r"^[A-Fa-f0-9]{32}$", indicator) or \
        re.match(r"^[A-Fa-f0-9]{40}$", indicator) or \
        re.match(r"^[A-Fa-f0-9]{64}$", indicator):
         return "HASH"
-    
-    # Check for IP
     try:
         ipaddress.ip_address(indicator)
         return "IP"
@@ -148,9 +145,9 @@ def query_virustotal(indicator, ind_type):
                 "total_engines": sum(stats.values())
             }
         elif response.status_code == 404:
-            return {"error": "Indicator not found in VirusTotal database."}
+            return {"error": "Not found in VirusTotal."}
         elif response.status_code == 429:
-            return {"error": "Rate Limited (Exceeded 4/min VT Free Tier)."}
+            return {"error": "Rate Limited (Exceeded 4/min)."}
         else:
             return {"error": f"HTTP {response.status_code}"}
     except Exception as e: return {"error": str(e)}
@@ -168,8 +165,7 @@ def query_whois(indicator, ind_type):
                 "country": res.get("asn_country_code", "Unknown"),
                 "ip_block": res.get("network", {}).get("cidr", "Unknown")
             }
-        except Exception as e: 
-            return {"error": f"IP WHOIS failed: {str(e)}"}
+        except Exception as e: return {"error": "IP WHOIS failed"}
     else:
         try:
             w = whois.whois(indicator)
@@ -179,14 +175,12 @@ def query_whois(indicator, ind_type):
                 "creation_date": str(w.creation_date[0]) if isinstance(w.creation_date, list) else str(w.creation_date),
                 "country": w.country or "Unknown"
             }
-        except Exception as e: 
-            return {"error": "WHOIS lookup failed or domain is protected."}
+        except Exception as e: return {"error": "WHOIS lookup failed"}
 
 def query_otx_indicator(indicator, ind_type):
-    if not OTX_KEY: return {"error": "AlienVault API Key missing in secrets"}
+    if not OTX_KEY: return {"error": "AlienVault API Key missing"}
     headers = {"X-OTX-API-KEY": OTX_KEY}
     try:
-        # Route to the correct OTX Endpoint
         if ind_type == "IP":
             url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{indicator}/general"
         elif ind_type == "HASH":
@@ -201,16 +195,15 @@ def query_otx_indicator(indicator, ind_type):
             if ind_type == "IP":
                 res_data["country"] = data.get("base_indicator", {}).get("country", "Unknown")
             return res_data
-        return {"error": f"HTTP Status {response.status_code}"}
+        return {"error": f"HTTP {response.status_code}"}
     except Exception as e: return {"error": str(e)}
 
 def query_urlhaus_indicator(indicator, ind_type):
     try:
         if ind_type == "HASH":
             url = "https://urlhaus-api.abuse.ch/v1/payload/"
-            # Determine hash type for URLhaus payload endpoint
             hash_param = "md5_hash" if len(indicator) == 32 else "sha256_hash"
-            if len(indicator) == 40: return {"error": "URLhaus does not support SHA-1 searches."}
+            if len(indicator) == 40: return {"error": "SHA-1 not supported."}
             res = requests.post(url, data={hash_param: indicator}).json()
         else:
             url = "https://urlhaus-api.abuse.ch/v1/host/"
@@ -219,8 +212,7 @@ def query_urlhaus_indicator(indicator, ind_type):
         if res.get("query_status") == "ok":
             urls = res.get("urls", [])
             return {"hit": True, "count": len(urls), "first_seen": res.get("firstseen", "Unknown")}
-        else:
-            return {"hit": False, "msg": "Clean. No known payload activity."}
+        return {"hit": False, "msg": "Clean. No payload activity."}
     except Exception as e: return {"error": str(e)}
 
 def query_threatfox_indicator(indicator):
@@ -232,8 +224,40 @@ def query_threatfox_indicator(indicator):
             data = res.get("data", [])
             malware = list(set([item.get("malware_printable", "Unknown") for item in data]))
             return {"hit": True, "count": len(data), "malware": malware}
-        else:
-            return {"hit": False, "msg": "Clean. No known C2 activity."}
+        return {"hit": False, "msg": "Clean. No C2 activity."}
+    except Exception as e: return {"error": str(e)}
+
+def query_urlscan_indicator(indicator, ind_type):
+    if ind_type == "HASH":
+        return {"error": "urlscan.io is for URLs and IPs, not Hashes."}
+        
+    headers = {"API-Key": URLSCAN_KEY} if URLSCAN_KEY else {}
+    
+    if ind_type == "IP":
+        q = f"ip:\"{indicator}\""
+    else:
+        clean_ind = indicator.replace("http://", "").replace("https://", "")
+        q = f"page.domain:\"{clean_ind}\" OR page.url:\"{indicator}\""
+        
+    url = f"https://urlscan.io/api/v1/search/?q={q}&size=1"
+    try:
+        res = requests.get(url, headers=headers)
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("results"):
+                latest = data["results"][0]
+                uuid = latest.get("task", {}).get("uuid") or latest.get("_id")
+                return {
+                    "hit": True,
+                    "uuid": uuid,
+                    "screenshot": f"https://urlscan.io/screenshots/{uuid}.png",
+                    "report_url": latest.get("result"),
+                    "ip": latest.get("page", {}).get("ip", "Unknown"),
+                    "domain": latest.get("page", {}).get("domain", "Unknown"),
+                    "date": latest.get("task", {}).get("time", "Unknown")[:10]
+                }
+            return {"hit": False, "msg": "No historical scans found."}
+        return {"error": f"HTTP {res.status_code}"}
     except Exception as e: return {"error": str(e)}
 
 # ==========================================
@@ -260,7 +284,6 @@ st.caption(f"Last Data Refresh: {pd.Timestamp.now().strftime('%H:%M:%S')}")
 # --- PAGE ROUTING LOGIC ---
 # ==========================================
 
-# --- PAGE 1: URLHAUS ---
 if page == "🌐 Global Telemetry (URLhaus)":
     st.title("🌐 URLhaus: Malware Distribution")
     df_u = fetch_urlhaus()
@@ -278,7 +301,6 @@ if page == "🌐 Global Telemetry (URLhaus)":
             st.dataframe(df_u[['date_added', 'host', 'country', 'tags', 'Reference URL']].head(15), use_container_width=True, column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View intel ↗")})
     else: st.info("No URLhaus data available.")
 
-# --- PAGE 2: THREATFOX ---
 elif page == "🦊 C2 Infrastructure (ThreatFox)":
     st.title("🦊 ThreatFox: Command & Control")
     df_t = fetch_threatfox()
@@ -292,7 +314,6 @@ elif page == "🦊 C2 Infrastructure (ThreatFox)":
         st.dataframe(df_t[['first_seen', 'ioc', 'ioc_type', 'malware_printable', 'Reference URL']].head(20), use_container_width=True, column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View on ThreatFox ↗")})
     else: st.info("No ThreatFox data found.")
 
-# --- PAGE 3: STRATEGIC INTEL ---
 elif page == "🚨 Strategic Intel (CISA & APTs)":
     st.title("🚨 Strategic Intelligence")
     st.subheader("🥷 APT Campaign Tracker")
@@ -306,13 +327,12 @@ elif page == "🚨 Strategic Intel (CISA & APTs)":
     if not df_cisa.empty:
         st.dataframe(df_cisa[['dateAdded', 'cveID', 'vulnerabilityName', 'Severity', 'requiredAction', 'Reference URL']].head(20), use_container_width=True, column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View on NIST ↗")})
 
-# --- PAGE 4: MULTI-SOURCE ENRICHMENT & PIVOT LINKS ---
 elif page == "🔬 Multi-Source Enrichment":
     st.title("🔬 Multi-Source Bulk Enrichment")
-    st.markdown("Query VirusTotal, AlienVault, WHOIS, URLhaus, and ThreatFox simultaneously.")
+    st.markdown("Query VirusTotal, AlienVault, WHOIS, URLhaus, ThreatFox, and urlscan.io simultaneously.")
     
     st.markdown("### Target Indicators")
-    st.info("💡 **Pro Tip:** Paste IPs, Domains, or Hashes (MD5, SHA1, SHA256). Max 4 per scan.")
+    st.info("💡 **Pro Tip:** Paste IPs, Domains, or Hashes. Max 4 per scan.")
     
     target_indicators_raw = st.text_area("Enter IOCs (one per line):", placeholder="8.8.8.8\nevil-domain.com\n44d88612fea8a8f36de82e1278abb02f", height=120, label_visibility="collapsed")
     
@@ -327,7 +347,6 @@ elif page == "🔬 Multi-Source Enrichment":
             st.markdown("---")
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
             summary_results = []
 
             for idx, target_indicator in enumerate(indicators):
@@ -340,6 +359,7 @@ elif page == "🔬 Multi-Source Enrichment":
                 whois_data = query_whois(target_indicator, ind_type)
                 urlhaus_data = query_urlhaus_indicator(target_indicator, ind_type)
                 threatfox_data = query_threatfox_indicator(target_indicator)
+                urlscan_data = query_urlscan_indicator(target_indicator, ind_type)
                 
                 # --- Build Summary Row ---
                 vt_status = f"{vt_data.get('malicious', 0)} / {vt_data.get('total_engines', 0)}" if "error" not in vt_data else vt_data["error"]
@@ -347,9 +367,9 @@ elif page == "🔬 Multi-Source Enrichment":
                     "Indicator": target_indicator,
                     "Type": ind_type,
                     "VT Malicious": vt_status,
-                    "OTX Pulses": otx_data.get("pulses", 0) if "error" not in otx_data else "N/A",
                     "URLhaus Hit": "Yes" if urlhaus_data.get("hit") else "No",
-                    "ThreatFox C2": "Yes" if threatfox_data.get("hit") else "No"
+                    "ThreatFox C2": "Yes" if threatfox_data.get("hit") else "No",
+                    "urlscan Record": "Yes" if urlscan_data.get("hit") else "No"
                 })
 
                 # --- Build Detailed Expander ---
@@ -390,27 +410,51 @@ elif page == "🔬 Multi-Source Enrichment":
 
                     st.markdown("---")
                     
-                    # --- External Pivot Links (Hash-Aware) ---
+                    # --- NEW: VISUAL INTELLIGENCE (urlscan.io) ---
+                    st.markdown("#### 📸 Visual Intelligence (urlscan.io)")
+                    if "error" in urlscan_data:
+                        st.warning(urlscan_data["error"])
+                    elif urlscan_data.get("hit"):
+                        col_img, col_info = st.columns([2, 1])
+                        with col_img:
+                            st.image(urlscan_data["screenshot"], caption=f"Snapshot from {urlscan_data['date']}", use_container_width=True)
+                        with col_info:
+                            st.info("Scan Environment")
+                            st.write(f"**Resolved IP:** `{urlscan_data['ip']}`")
+                            st.write(f"**Domain Scanned:** `{urlscan_data['domain']}`")
+                            st.write(f"**Scan Date:** {urlscan_data['date']}")
+                    else:
+                        st.info("No historical screenshots found for this indicator on urlscan.io.")
+
+                    st.markdown("---")
+                    
+                    # --- External Pivot Links (5 Columns Now) ---
                     st.markdown("**🔗 External Intelligence Links**")
-                    link_col1, link_col2, link_col3, link_col4 = st.columns(4)
+                    link_col1, link_col2, link_col3, link_col4, link_col5 = st.columns(5)
                     
                     with link_col1:
                         if ind_type == "HASH": vt_search_url = f"https://www.virustotal.com/gui/file/{target_indicator}"
                         else: vt_search_url = f"https://www.virustotal.com/gui/search/{target_indicator}"
-                        st.link_button("View on VirusTotal ↗", vt_search_url, use_container_width=True)
+                        st.link_button("VirusTotal ↗", vt_search_url, use_container_width=True)
                         
                     with link_col2:
                         otx_path = f"file/{target_indicator}" if ind_type == "HASH" else (f"ip/{target_indicator}" if ind_type == "IP" else f"domain/{target_indicator}")
-                        st.link_button("View on OTX ↗", "https://otx.alienvault.com/indicator/" + otx_path, use_container_width=True)
+                        st.link_button("AlienVault OTX ↗", "https://otx.alienvault.com/indicator/" + otx_path, use_container_width=True)
                         
                     with link_col3:
                         if ind_type == "HASH": urlhaus_web_url = f"https://urlhaus.abuse.ch/browse.php?search={target_indicator}"
                         else: urlhaus_web_url = f"https://urlhaus.abuse.ch/host/{target_indicator}/"
-                        st.link_button("View on URLhaus ↗", urlhaus_web_url, use_container_width=True)
+                        st.link_button("URLhaus ↗", urlhaus_web_url, use_container_width=True)
                         
                     with link_col4:
                         tf_web_url = f"https://threatfox.abuse.ch/browse.php?search=ioc%3A{target_indicator}"
-                        st.link_button("View on ThreatFox ↗", tf_web_url, use_container_width=True)
+                        st.link_button("ThreatFox ↗", tf_web_url, use_container_width=True)
+
+                    with link_col5:
+                        if urlscan_data.get("hit"):
+                            st.link_button("urlscan.io Report ↗", urlscan_data["report_url"], use_container_width=True)
+                        else:
+                            st.link_button("Search urlscan.io ↗", f"https://urlscan.io/search/#\"{target_indicator}\"", use_container_width=True)
 
                 progress_bar.progress((idx + 1) / len(indicators))
                 if idx < len(indicators) - 1:
