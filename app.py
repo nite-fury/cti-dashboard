@@ -62,9 +62,18 @@ def fetch_threatfox():
         res = requests.post(url, json={"query": "get_iocs", "days": 1}, headers=headers).json()
         if res.get("query_status") == "ok":
             df = pd.DataFrame(res["data"])
+            
             # ThreatFox ID linkage
             if 'id' in df.columns:
-                df['Reference URL'] = "https://threatfox.abuse.ch/ioc/" + df['id'].astype(str) + "/"
+                # Safely strip any '.0' if Pandas converted the column to floats
+                def format_url(val):
+                    try:
+                        clean_id = str(int(float(val)))
+                        return f"https://threatfox.abuse.ch/ioc/{clean_id}"
+                    except:
+                        return "https://threatfox.abuse.ch/"
+                
+                df['Reference URL'] = df['id'].apply(format_url)
             else:
                 df['Reference URL'] = "https://threatfox.abuse.ch/"
             return df
