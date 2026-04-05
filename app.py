@@ -7,6 +7,7 @@ import ipaddress
 import base64
 import whois
 from ipwhois import IPWhois
+import time
 
 # ==========================================
 # --- PAGE CONFIGURATION ---
@@ -136,6 +137,8 @@ def query_virustotal(indicator, ind_type):
             }
         elif response.status_code == 404:
             return {"error": "Indicator not found in VirusTotal database."}
+        elif response.status_code == 429:
+            return {"error": "Rate Limited (Exceeded 4/min VT Free Tier)."}
         else:
             return {"error": f"HTTP {response.status_code}"}
     except Exception as e: return {"error": str(e)}
@@ -273,26 +276,55 @@ elif page == "🚨 Strategic Intel (CISA & APTs)":
 
 # --- PAGE 4: MULTI-SOURCE ENRICHMENT & PIVOT LINKS ---
 elif page == "🔬 Multi-Source Enrichment":
-    st.title("🔬 Multi-Source Indicator Enrichment")
-    st.markdown("Simultaneously query multiple intelligence sources.")
+    st.title("🔬 Multi-Source Bulk Enrichment")
+    st.markdown("Query VirusTotal, AlienVault, WHOIS, URLhaus, and ThreatFox simultaneously.")
     
-    col_left, col_mid, col_right = st.columns([1, 2, 1])
-    with col_mid:
-        target_indicator = st.text_input("Enter IP, Domain, or URL:", placeholder="e.g., 8.8.8.8", label_visibility="collapsed")
-        if st.button("Run Global Scan", use_container_width=True):
-            if target_indicator:
+    st.markdown("### Target Indicators")
+    st.info("💡 **Pro Tip:** You can paste multiple IPs/Domains (one per line). Limited to 4 per scan to respect VirusTotal's Free Tier limits.")
+    
+    target_indicators_raw = st.text_area("Enter IPs, Domains, or URLs:", placeholder="8.8.8.8\nevil-domain.com\n1.1.1.1", height=120, label_visibility="collapsed")
+    
+    if st.button("Run Global Scan", use_container_width=True):
+        # Process input into a clean list
+        indicators = [i.strip() for i in target_indicators_raw.split('\n') if i.strip()]
+        
+        if not indicators:
+            st.warning("Please enter at least one target.")
+        elif len(indicators) > 4:
+            st.error("🛑 Request too large. Please limit bulk scans to a maximum of 4 indicators at a time to prevent API rate limiting.")
+        else:
+            st.markdown("---")
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # List to hold summary data for the top table
+            summary_results = []
+
+            for idx, target_indicator in enumerate(indicators):
+                status_text.text(f"Scanning ({idx+1}/{len(indicators)}): {target_indicator}")
                 ind_type = check_indicator_type(target_indicator)
-                st.markdown("---")
-                st.success(f"Scanning **{ind_type}**: {target_indicator}")
                 
-                with st.spinner('Gathering Intelligence...'):
-                    vt_data = query_virustotal(target_indicator, ind_type)
-                    otx_data = query_otx_ip(target_indicator) if ind_type == "IP" else {"error": "Skipped"}
-                    whois_data = query_whois(target_indicator, ind_type)
-                    urlhaus_data = query_urlhaus_indicator(target_indicator)
-                    threatfox_data = query_threatfox_indicator(target_indicator)
-                    
-                    # --- Intelligence Grid ---
+                # --- Fetching Data ---
+                vt_data = query_virustotal(target_indicator, ind_type)
+                otx_data = query_otx_ip(target_indicator) if ind_type == "IP" else {"error": "Skipped"}
+                whois_data = query_whois(target_indicator, ind_type)
+                urlhaus_data = query_urlhaus_indicator(target_indicator)
+                threatfox_data = query_threatfox_indicator(target_indicator)
+                
+                # --- Build Summary Row ---
+                vt_status = f"{vt_data.get('malicious', 0)} / {vt_data.get('total_engines', 0)}" if "error" not in vt_data else vt_data["error"]
+                summary_results.append({
+                    "Indicator": target_indicator,
+                    "Type": ind_type,
+                    "VT Malicious": vt_status,
+                    "OTX Pulses": otx_data.get("pulses", 0) if "error" not in otx_data else "N/A",
+                    "URLhaus Hit": "Yes" if urlhaus_data.get("hit") else "No",
+                    "ThreatFox C2": "Yes" if threatfox_data.get("hit") else "No"
+                })
+
+                # --- Build Detailed Expander ---
+                with st.expander(f"Deep Dive: {target_indicator}", expanded=(len(indicators) == 1)):
+                    # Intelligence Grid
                     res_col1, res_col2, res_col3 = st.columns(3)
                     with res_col1:
                         st.info("🦠 **VirusTotal**")
@@ -313,43 +345,49 @@ elif page == "🔬 Multi-Source Enrichment":
                                 
                     st.markdown("---")
                     
-                    # --- Community Intel ---
+                    # Community Intel
                     res_col4, res_col5 = st.columns(2)
                     with res_col4:
                         st.info("🌐 **URLhaus**")
                         if urlhaus_data.get("hit"): st.error(f"⚠️ Malware Host Detected")
                         else: st.success("No Payload History")
                     with res_col5:
-                        st.info("Fox **ThreatFox**")
+                        st.info("🦊 **ThreatFox**")
                         if threatfox_data.get("hit"): st.error(f"⚠️ Known C2 Node")
                         else: st.success("No C2 Activity")
 
                     st.markdown("---")
                     
-                    # --- EXTERNAL PIVOT LINKS ---
-                    st.subheader("🔗 External Intelligence Links")
-                    st.markdown("Click below to open these indicators directly on the source platforms for manual investigation.")
-                    
+                    # External Pivot Links
+                    st.markdown("**🔗 External Intelligence Links**")
                     link_col1, link_col2, link_col3, link_col4 = st.columns(4)
-                    
                     with link_col1:
                         vt_search_url = f"https://www.virustotal.com/gui/search/{target_indicator}"
                         st.link_button("View on VirusTotal ↗", vt_search_url, use_container_width=True)
-                        
-                        whois_web_url = f"https://www.whois.com/whois/{target_indicator}"
-                        st.link_button("View on WHOIS.com ↗", whois_web_url, use_container_width=True)
-
                     with link_col2:
                         otx_base = "https://otx.alienvault.com/indicator/"
                         otx_path = f"ip/{target_indicator}" if ind_type == "IP" else f"domain/{target_indicator}"
                         st.link_button("View on OTX ↗", otx_base + otx_path, use_container_width=True)
-
                     with link_col3:
                         urlhaus_web_url = f"https://urlhaus.abuse.ch/host/{target_indicator}/"
                         st.link_button("View on URLhaus ↗", urlhaus_web_url, use_container_width=True)
-
                     with link_col4:
                         tf_web_url = f"https://threatfox.abuse.ch/browse.php?search=ioc%3A{target_indicator}"
                         st.link_button("View on ThreatFox ↗", tf_web_url, use_container_width=True)
-            else:
-                st.warning("Please enter a target first.")
+
+                # Update progress
+                progress_bar.progress((idx + 1) / len(indicators))
+                
+                # Small delay to respect APIs if processing multiple
+                if idx < len(indicators) - 1:
+                    time.sleep(1)
+
+            # Display the summary table at the very top after finishing
+            status_text.empty()
+            progress_bar.empty()
+            st.success("✅ Bulk Scan Complete!")
+            st.subheader("📊 Scan Summary")
+            
+            # Conditionally format the dataframe based on hits
+            df_summary = pd.DataFrame(summary_results)
+            st.dataframe(df_summary, use_container_width=True)
