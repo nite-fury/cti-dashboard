@@ -54,19 +54,58 @@ def fetch_threatfox():
 
 @st.cache_data(ttl=300)
 def fetch_apt_pulses(search_term="APT"):
-    if not OTX_KEY: return pd.DataFrame()
-    url = f"https://otx.alienvault.com/api/v1/search/pulses?q={search_term}&sort=-modified&limit=15"
+    """Fetches the latest threat intelligence pulses with robust error handling"""
+    if not OTX_KEY: 
+        st.error("AlienVault API Key is missing from secrets.")
+        return pd.DataFrame()
+        
+    url = "https://otx.alienvault.com/api/v1/search/pulses"
     headers = {"X-OTX-API-KEY": OTX_KEY}
+    
+    # Using the params dictionary automatically handles URL encoding for spaces
+    params = {
+        "q": search_term,
+        "sort": "-modified",
+        "limit": 15
+    }
+    
     try:
-        res = requests.get(url, headers=headers).json()
-        if "results" in res and res["results"]:
-            df = pd.DataFrame(res["results"])
-            df['Date'] = pd.to_datetime(df['modified']).dt.strftime('%Y-%m-%d')
-            df['Tags'] = df['tags'].apply(lambda x: ', '.join(x[:5]) if isinstance(x, list) else 'none')
-            df = df.rename(columns={'name': 'Campaign / Report', 'author_name': 'Reporter', 'indicator_count': 'IOCs'})
+        res = requests.get(url, headers=headers, params=params)
+        
+        # 1. Check if AlienVault is angry at us (e.g., 403 Forbidden, 429 Rate Limit)
+        if res.status_code != 200:
+            st.error(f"OTX API Error {res.status_code}: {res.reason}")
+            return pd.DataFrame()
+            
+        data = res.json()
+        
+        # 2. Check if we actually got results back
+        if "results" in data and len(data["results"]) > 0:
+            df = pd.DataFrame(data["results"])
+            
+            # 3. Safely extract data using .get() to prevent KeyErrors if OTX omits a field
+            df['Date'] = pd.to_datetime(df.get('modified', pd.Timestamp.now())).dt.strftime('%Y-%m-%d')
+            
+            # Safely handle tags which might be missing or empty
+            if 'tags' in df.columns:
+                df['Tags'] = df['tags'].apply(lambda x: ', '.join(x[:5]) if isinstance(x, list) else 'none')
+            else:
+                df['Tags'] = 'none'
+                
+            df['Campaign / Report'] = df.get('name', 'Unknown Campaign')
+            df['Reporter'] = df.get('author_name', 'Unknown')
+            df['IOCs'] = df.get('indicator_count', 0)
+            
             return df[['Date', 'Campaign / Report', 'Reporter', 'IOCs', 'Tags']]
-    except: pass
-    return pd.DataFrame()
+            
+        else:
+            # The search was successful, but no campaigns matched the keyword
+            return pd.DataFrame()
+            
+    except Exception as e: 
+        # 4. Print Python errors directly to the UI so we can debug them
+        st.error(f"Data Processing Error: {str(e)}")
+        return pd.DataFrame()
 
 def query_otx_ip(ip_address):
     if not OTX_KEY: return {"error": "AlienVault API Key missing in secrets"}
