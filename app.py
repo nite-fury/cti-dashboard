@@ -12,15 +12,6 @@ OTX_KEY = st.secrets.get("OTX_API_KEY", "")
 THREATFOX_KEY = st.secrets.get("THREATFOX_KEY", "")
 URLHAUS_KEY = st.secrets.get("URLHAUS_KEY", "")
 
-# --- 🔄 REFRESH LOGIC ---
-st.sidebar.title("⚙️ Dashboard Settings")
-refresh_interval = st.sidebar.selectbox(
-    "Set Refresh Rate:",
-    options=[5, 10, 30, 60],
-    format_func=lambda x: f"Every {x} Minutes"
-)
-count = st_autorefresh(interval=refresh_interval * 60 * 1000, key="ctirefresh")
-
 # --- DATA FETCHING FUNCTIONS ---
 @st.cache_data(ttl=3600)
 def fetch_cisa_with_severity():
@@ -63,9 +54,7 @@ def fetch_threatfox():
 
 @st.cache_data(ttl=300)
 def fetch_apt_pulses(search_term="APT"):
-    """Fetches the latest threat intelligence pulses matching an APT search"""
     if not OTX_KEY: return pd.DataFrame()
-    # Query OTX for the latest pulses modified containing the search term
     url = f"https://otx.alienvault.com/api/v1/search/pulses?q={search_term}&sort=-modified&limit=15"
     headers = {"X-OTX-API-KEY": OTX_KEY}
     try:
@@ -74,11 +63,9 @@ def fetch_apt_pulses(search_term="APT"):
             df = pd.DataFrame(res["results"])
             df['Date'] = pd.to_datetime(df['modified']).dt.strftime('%Y-%m-%d')
             df['Tags'] = df['tags'].apply(lambda x: ', '.join(x[:5]) if isinstance(x, list) else 'none')
-            # Rename columns for the UI
             df = df.rename(columns={'name': 'Campaign / Report', 'author_name': 'Reporter', 'indicator_count': 'IOCs'})
             return df[['Date', 'Campaign / Report', 'Reporter', 'IOCs', 'Tags']]
-    except Exception as e: 
-        print(e)
+    except: pass
     return pd.DataFrame()
 
 def query_otx_ip(ip_address):
@@ -94,66 +81,114 @@ def query_otx_ip(ip_address):
     except Exception as e: return {"error": str(e)}
 
 # ==========================================
-# --- DASHBOARD LAYOUT ---
+# --- SIDEBAR NAVIGATION & SETTINGS ---
+# ==========================================
+with st.sidebar:
+    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/c/c2/Cyber_security_icon.svg/512px-Cyber_security_icon.svg.png", width=50)
+    st.title("Navigation")
+    
+    # The Navigation Menu
+    page = st.radio(
+        "Select a Module:",
+        ["🌐 Global Telemetry (URLhaus)", "🦊 C2 Infrastructure (ThreatFox)", "🚨 Strategic Intel (CISA & APTs)", "🔍 Deep Dive IP Investigation"]
+    )
+    
+    st.markdown("---")
+    st.subheader("⚙️ Settings")
+    refresh_interval = st.selectbox("Auto-Refresh Rate:", options=[5, 10, 30, 60], format_func=lambda x: f"Every {x} Minutes")
+
+# Initialize the autorefresh
+count = st_autorefresh(interval=refresh_interval * 60 * 1000, key="ctirefresh")
+
+# ==========================================
+# --- PAGE ROUTING LOGIC ---
 # ==========================================
 
-# Sidebar OTX Tool
-with st.sidebar:
-    st.markdown("---")
-    st.subheader("🔍 IP Investigation")
-    target_ip = st.text_input("Enter IPv4 Address:")
-    if st.button("Investigate IP"):
-        if target_ip:
-            with st.spinner('Querying OTX...'):
-                otx_data = query_otx_ip(target_ip)
-                if "error" in otx_data: 
-                    st.error(otx_data["error"])
-                else:
-                    st.success("Target Analyzed")
-                    st.metric("Associated Threat Pulses", otx_data["pulses"])
-                    st.write(f"**Origin Country:** {otx_data['country']}")
+st.caption(f"Last Data Refresh: {pd.Timestamp.now().strftime('%H:%M:%S')}")
 
-# Main Dashboard Header
-st.title("🛡️ SOC Master Dashboard")
-st.caption(f"Last Refresh: {pd.Timestamp.now().strftime('%H:%M:%S')} (Interval: {refresh_interval}m)")
-
-# --- TOP ROW: TACTICAL INTEL ---
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("🌐 URLhaus Telemetry")
+# --- PAGE 1: URLHAUS ---
+if page == "🌐 Global Telemetry (URLhaus)":
+    st.title("🌐 URLhaus: Malware Distribution")
+    st.markdown("Live telemetry of malicious URLs and their geographical hosting locations.")
+    
     df_u = fetch_urlhaus()
     if not df_u.empty:
-        st.map(df_u.dropna(subset=['lat', 'lon']), size=20, color="#ff4b4b")
-        st.dataframe(df_u[['host', 'country', 'tags']].head(5), use_container_width=True)
+        # Give the map the full width of the top screen
+        st.map(df_u.dropna(subset=['lat', 'lon']), size=25, color="#ff4b4b", use_container_width=True)
+        st.markdown("---")
+        
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            tag_counts = df_u['tags'].str.split(', ').explode().value_counts().head(10).reset_index()
+            tag_counts.columns = ['Tag', 'Count']
+            fig = px.bar(tag_counts, x='Tag', y='Count', color='Count', color_continuous_scale='Reds', title="Top Malware Families")
+            st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            st.subheader("Recent Host Detections")
+            st.dataframe(df_u[['date_added', 'host', 'country', 'tags']].head(15), use_container_width=True)
+    else:
+        st.info("No URLhaus data available.")
 
-with col2:
-    st.subheader("🦊 ThreatFox C2 Feed")
+# --- PAGE 2: THREATFOX ---
+elif page == "🦊 C2 Infrastructure (ThreatFox)":
+    st.title("🦊 ThreatFox: Command & Control")
+    st.markdown("Tracking active C2 servers communicating over the public internet.")
+    
     df_t = fetch_threatfox()
     if not df_t.empty:
-        st.dataframe(df_t[['ioc', 'ioc_type', 'malware_printable']].head(10), use_container_width=True)
+        malware_counts = df_t['malware_printable'].value_counts().head(15).reset_index()
+        malware_counts.columns = ['Malware Family', 'Active Servers']
+        fig = px.bar(malware_counts, x='Malware Family', y='Active Servers', color='Active Servers', color_continuous_scale='Oranges')
+        # Full width chart
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("---")
+        st.subheader("Latest C2 Indicators of Compromise")
+        st.dataframe(df_t[['first_seen', 'ioc', 'ioc_type', 'malware_printable']].head(20), use_container_width=True)
+    else:
+        st.info("No ThreatFox data found.")
 
-st.markdown("---")
-
-# --- BOTTOM ROW: STRATEGIC INTEL ---
-col3, col4 = st.columns(2)
-
-with col3:
-    st.subheader("🚨 Actively Exploited CVEs (CISA)")
-    df_cisa = fetch_cisa_with_severity()
-    if not df_cisa.empty:
-        st.dataframe(
-            df_cisa[['dateAdded', 'cveID', 'vulnerabilityName', 'Severity']].head(15), 
-            use_container_width=True
-        )
-
-with col4:
-    st.subheader("🥷 APT Intel & Campaign Tracker")
-    # Live Search Bar for APTs
-    apt_search = st.text_input("Search Actor, Campaign, or Region:", value="APT", placeholder="e.g., Lazarus, Cozy Bear, APT29...")
+# --- PAGE 3: STRATEGIC INTEL ---
+elif page == "🚨 Strategic Intel (CISA & APTs)":
+    st.title("🚨 Strategic Intelligence")
+    st.markdown("Monitor high-level actor campaigns and actively exploited network vulnerabilities.")
     
+    # Stack them vertically for maximum readability
+    st.subheader("🥷 APT Campaign Tracker")
+    apt_search = st.text_input("Search Threat Actor or Campaign:", value="APT", placeholder="e.g., Lazarus, MuddyWater...")
     df_apt = fetch_apt_pulses(apt_search)
     if not df_apt.empty:
         st.dataframe(df_apt, use_container_width=True)
-    else:
-        st.info(f"No recent reports found for '{apt_search}'. Check your OTX API key.")
+    
+    st.markdown("---")
+    
+    st.subheader("🚨 CISA Known Exploited Vulnerabilities")
+    df_cisa = fetch_cisa_with_severity()
+    if not df_cisa.empty:
+        st.dataframe(df_cisa[['dateAdded', 'cveID', 'vulnerabilityName', 'Severity', 'requiredAction']].head(20), use_container_width=True)
+
+# --- PAGE 4: IP INVESTIGATION ---
+elif page == "🔍 Deep Dive IP Investigation":
+    st.title("🔍 Deep Dive IP Investigation")
+    st.markdown("Query suspicious IP addresses against AlienVault OTX.")
+    
+    # Centered search box layout
+    col_left, col_mid, col_right = st.columns([1, 2, 1])
+    with col_mid:
+        st.markdown("### Target IP Address")
+        target_ip = st.text_input("IPv4 Address:", placeholder="e.g., 8.8.8.8", label_visibility="collapsed")
+        
+        if st.button("Run Global Scan", use_container_width=True):
+            if target_ip:
+                with st.spinner('Querying Threat Intel Sources...'):
+                    otx_data = query_otx_ip(target_ip)
+                    
+                    st.markdown("---")
+                    st.success(f"Scan complete for: **{target_ip}**")
+                    
+                    if "error" in otx_data: 
+                        st.error(otx_data["error"])
+                    else:
+                        st.metric("Total Associated Threat Pulses", otx_data["pulses"])
+                        st.write(f"**Origin Country:** {otx_data['country']}")
+            else:
+                st.warning("Please enter a valid IP address.")
