@@ -123,7 +123,7 @@ def query_otx_ip(ip_address):
 # --- SIDEBAR NAVIGATION & SETTINGS ---
 # ==========================================
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/c/c2/Cyber_security_icon.svg/512px-Cyber_security_icon.svg.png", width=50)
+    st.image("https://img.icons8.com/color/96/000000/security-checked--v1.png", width=60)
     st.title("Navigation")
     
     # The Navigation Menu
