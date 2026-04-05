@@ -141,16 +141,32 @@ def query_virustotal(indicator, ind_type):
     except Exception as e: return {"error": str(e)}
 
 def query_whois(indicator, ind_type):
+    """Fetches Domain WHOIS or IP RDAP (Routing) data"""
     if ind_type == "IP":
-        return {"error": "WHOIS is more effective for domains. IP assigned to regional registry."}
-    try:
-        w = whois.whois(indicator)
-        return {
-            "registrar": w.registrar or "Unknown",
-            "creation_date": str(w.creation_date[0]) if isinstance(w.creation_date, list) else str(w.creation_date),
-            "country": w.country or "Unknown"
-        }
-    except Exception as e: return {"error": "WHOIS lookup failed or domain is protected."}
+        try:
+            # Uses RDAP to fetch accurate IP allocations and CIDR blocks
+            obj = IPWhois(indicator)
+            res = obj.lookup_rdap()
+            return {
+                "type": "IP",
+                "org": res.get("asn_description", "Unknown"),
+                "country": res.get("asn_country_code", "Unknown"),
+                "ip_block": res.get("network", {}).get("cidr", "Unknown")
+            }
+        except Exception as e: 
+            return {"error": f"IP WHOIS failed: {str(e)}"}
+    else:
+        try:
+            # Uses standard WHOIS for domain registrations
+            w = whois.whois(indicator)
+            return {
+                "type": "Domain",
+                "registrar": w.registrar or "Unknown",
+                "creation_date": str(w.creation_date[0]) if isinstance(w.creation_date, list) else str(w.creation_date),
+                "country": w.country or "Unknown"
+            }
+        except Exception as e: 
+            return {"error": "WHOIS lookup failed or domain is protected."}
 
 def query_otx_ip(ip_address):
     if not OTX_KEY: return {"error": "AlienVault API Key missing in secrets"}
@@ -309,13 +325,17 @@ elif page == "🔬 Multi-Source Enrichment":
                             st.metric("Associated Pulses", otx_data["pulses"])
                             st.write(f"**Origin:** {otx_data['country']}")
                             
+                    # --- WHOIS / ROUTING RESULTS ---
                     with res_col3:
-                        st.info("🌐 **WHOIS Record**")
+                        st.info("🌐 **Registration & Routing**")
                         if "error" in whois_data:
                             st.warning(whois_data["error"])
                         else:
-                            st.write(f"**Registrar:** {whois_data['registrar']}")
-                            st.write(f"**Registered:** {whois_data['creation_date'][:10] if whois_data['creation_date'] else 'Unknown'}")
-                            st.write(f"**Country:** {whois_data['country']}")
-            else:
-                st.warning("Please enter a valid IP or Domain.")
+                            if whois_data["type"] == "Domain":
+                                st.write(f"**Registrar:** {whois_data['registrar']}")
+                                st.write(f"**Registered:** {whois_data['creation_date'][:10] if whois_data['creation_date'] else 'Unknown'}")
+                                st.write(f"**Country:** {whois_data['country']}")
+                            else:
+                                st.write(f"**ISP / Org:** {whois_data['org']}")
+                                st.write(f"**Country:** {whois_data['country']}")
+                                st.write(f"**IP Block (CIDR):** `{whois_data['ip_block']}`")
