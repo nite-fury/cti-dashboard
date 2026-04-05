@@ -6,6 +6,7 @@ from streamlit_autorefresh import st_autorefresh
 import ipaddress
 import base64
 import whois
+from ipwhois import IPWhois
 
 # ==========================================
 # --- PAGE CONFIGURATION ---
@@ -339,3 +340,5 @@ elif page == "🔬 Multi-Source Enrichment":
                                 st.write(f"**ISP / Org:** {whois_data['org']}")
                                 st.write(f"**Country:** {whois_data['country']}")
                                 st.write(f"**IP Block (CIDR):** `{whois_data['ip_block']}`")
+            else:
+                st.warning("Please enter a valid IP or Domain.")
