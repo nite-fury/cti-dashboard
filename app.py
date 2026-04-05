@@ -177,38 +177,29 @@ def query_otx_ip(ip_address):
         return {"error": f"HTTP Status {response.status_code}"}
     except Exception as e: return {"error": str(e)}
 
-# --- NEW: Abuse.ch Enrichment Functions ---
 def query_urlhaus_indicator(indicator):
-    """Checks if a domain/IP is known to host malware payloads"""
     url = "https://urlhaus-api.abuse.ch/v1/host/"
-    data = {"host": indicator}
-    # URLhaus host endpoint often accepts standard POST form data
     try:
-        res = requests.post(url, data=data).json()
+        res = requests.post(url, data={"host": indicator}).json()
         if res.get("query_status") == "ok":
             urls = res.get("urls", [])
             return {"hit": True, "count": len(urls), "first_seen": res.get("firstseen", "Unknown")}
         else:
             return {"hit": False, "msg": "Clean. No known payload hosting."}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as e: return {"error": str(e)}
 
 def query_threatfox_indicator(indicator):
-    """Checks if a domain/IP is a known Command & Control (C2) node"""
     url = "https://threatfox-api.abuse.ch/api/v1/"
     headers = {"Auth-Key": THREATFOX_KEY} if THREATFOX_KEY else {}
-    payload = {"query": "search_ioc", "search_term": indicator}
     try:
-        res = requests.post(url, json=payload, headers=headers).json()
+        res = requests.post(url, json={"query": "search_ioc", "search_term": indicator}, headers=headers).json()
         if res.get("query_status") == "ok":
             data = res.get("data", [])
-            # Extract unique malware family names associated with this indicator
             malware = list(set([item.get("malware_printable", "Unknown") for item in data]))
             return {"hit": True, "count": len(data), "malware": malware}
         else:
             return {"hit": False, "msg": "Clean. No known C2 activity."}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as e: return {"error": str(e)}
 
 # ==========================================
 # --- SIDEBAR NAVIGATION & SETTINGS ---
@@ -237,13 +228,10 @@ st.caption(f"Last Data Refresh: {pd.Timestamp.now().strftime('%H:%M:%S')}")
 # --- PAGE 1: URLHAUS ---
 if page == "🌐 Global Telemetry (URLhaus)":
     st.title("🌐 URLhaus: Malware Distribution")
-    st.markdown("Live telemetry of malicious URLs and their geographical hosting locations.")
-    
     df_u = fetch_urlhaus()
     if not df_u.empty:
         st.map(df_u.dropna(subset=['lat', 'lon']), size=25, color="#ff4b4b", use_container_width=True)
         st.markdown("---")
-        
         col1, col2 = st.columns([1, 2])
         with col1:
             tag_counts = df_u['tags'].str.split(', ').explode().value_counts().head(10).reset_index()
@@ -252,19 +240,12 @@ if page == "🌐 Global Telemetry (URLhaus)":
             st.plotly_chart(fig, use_container_width=True)
         with col2:
             st.subheader("Recent Host Detections")
-            st.dataframe(
-                df_u[['date_added', 'host', 'country', 'tags', 'Reference URL']].head(15), 
-                use_container_width=True,
-                column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View intel ↗")}
-            )
-    else:
-        st.info("No URLhaus data available.")
+            st.dataframe(df_u[['date_added', 'host', 'country', 'tags', 'Reference URL']].head(15), use_container_width=True, column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View intel ↗")})
+    else: st.info("No URLhaus data available.")
 
 # --- PAGE 2: THREATFOX ---
 elif page == "🦊 C2 Infrastructure (ThreatFox)":
     st.title("🦊 ThreatFox: Command & Control")
-    st.markdown("Tracking active C2 servers communicating over the public internet.")
-    
     df_t = fetch_threatfox()
     if not df_t.empty:
         malware_counts = df_t['malware_printable'].value_counts().head(15).reset_index()
@@ -272,133 +253,108 @@ elif page == "🦊 C2 Infrastructure (ThreatFox)":
         fig = px.bar(malware_counts, x='Malware Family', y='Active Servers', color='Active Servers', color_continuous_scale='Oranges')
         st.plotly_chart(fig, use_container_width=True)
         st.markdown("---")
-        
-        st.subheader("Latest C2 Indicators of Compromise")
-        st.dataframe(
-            df_t[['first_seen', 'ioc', 'ioc_type', 'malware_printable', 'Reference URL']].head(20), 
-            use_container_width=True,
-            column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View on ThreatFox ↗")}
-        )
-    else:
-        st.info("No ThreatFox data found.")
+        st.subheader("Latest C2 Indicators")
+        st.dataframe(df_t[['first_seen', 'ioc', 'ioc_type', 'malware_printable', 'Reference URL']].head(20), use_container_width=True, column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View on ThreatFox ↗")})
+    else: st.info("No ThreatFox data found.")
 
 # --- PAGE 3: STRATEGIC INTEL ---
 elif page == "🚨 Strategic Intel (CISA & APTs)":
     st.title("🚨 Strategic Intelligence")
-    st.markdown("Monitor high-level actor campaigns and actively exploited network vulnerabilities.")
-    
     st.subheader("🥷 APT Campaign Tracker")
-    apt_search = st.text_input("Search Threat Actor or Campaign:", value="APT", placeholder="e.g., Lazarus, MuddyWater...")
+    apt_search = st.text_input("Search Threat Actor or Campaign:", value="APT")
     df_apt = fetch_apt_pulses(apt_search)
-    
     if not df_apt.empty:
-        st.dataframe(
-            df_apt, 
-            use_container_width=True,
-            column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="Read Report ↗")}
-        )
-        
+        st.dataframe(df_apt, use_container_width=True, column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="Read Report ↗")})
     st.markdown("---")
-    
     st.subheader("🚨 CISA Known Exploited Vulnerabilities")
     df_cisa = fetch_cisa_with_severity()
     if not df_cisa.empty:
-        st.dataframe(
-            df_cisa[['dateAdded', 'cveID', 'vulnerabilityName', 'Severity', 'requiredAction', 'Reference URL']].head(20), 
-            use_container_width=True,
-            column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View on NIST ↗")}
-        )
+        st.dataframe(df_cisa[['dateAdded', 'cveID', 'vulnerabilityName', 'Severity', 'requiredAction', 'Reference URL']].head(20), use_container_width=True, column_config={"Reference URL": st.column_config.LinkColumn("Source Link", display_text="View on NIST ↗")})
 
-# --- PAGE 4: MULTI-SOURCE ENRICHMENT ---
+# --- PAGE 4: MULTI-SOURCE ENRICHMENT & PIVOT LINKS ---
 elif page == "🔬 Multi-Source Enrichment":
     st.title("🔬 Multi-Source Indicator Enrichment")
-    st.markdown("Simultaneously query VirusTotal, AlienVault, WHOIS, URLhaus, and ThreatFox.")
+    st.markdown("Simultaneously query multiple intelligence sources.")
     
     col_left, col_mid, col_right = st.columns([1, 2, 1])
     with col_mid:
-        st.markdown("### Target Indicator")
-        target_indicator = st.text_input("Enter IP, Domain, or URL:", placeholder="e.g., 8.8.8.8 or evil-domain.com", label_visibility="collapsed")
-        
+        target_indicator = st.text_input("Enter IP, Domain, or URL:", placeholder="e.g., 8.8.8.8", label_visibility="collapsed")
         if st.button("Run Global Scan", use_container_width=True):
             if target_indicator:
                 ind_type = check_indicator_type(target_indicator)
                 st.markdown("---")
                 st.success(f"Scanning **{ind_type}**: {target_indicator}")
                 
-                with st.spinner('Querying Threat Intel Sources...'):
-                    # Fetching from all 5 sources
+                with st.spinner('Gathering Intelligence...'):
                     vt_data = query_virustotal(target_indicator, ind_type)
-                    otx_data = query_otx_ip(target_indicator) if ind_type == "IP" else {"error": "OTX IP check skipped for domain."}
+                    ot_data = query_otx_ip(target_indicator) if ind_type == "IP" else {"error": "Skipped"}
                     whois_data = query_whois(target_indicator, ind_type)
                     urlhaus_data = query_urlhaus_indicator(target_indicator)
                     threatfox_data = query_threatfox_indicator(target_indicator)
                     
-                    # --- ROW 1: Broad Intelligence ---
+                    # --- Intelligence Grid ---
                     res_col1, res_col2, res_col3 = st.columns(3)
-                    
                     with res_col1:
                         st.info("🦠 **VirusTotal**")
-                        if "error" in vt_data:
-                            st.error(vt_data["error"])
+                        if "error" in vt_data: st.error(vt_data["error"])
                         else:
-                            mal_count = vt_data['malicious']
-                            if mal_count > 0:
-                                st.error(f"**{mal_count} / {vt_data['total_engines']}** Engines flagged")
-                            else:
-                                st.success(f"**0 / {vt_data['total_engines']}** Engines flagged. Clean.")
-                            st.write(f"Suspicious: {vt_data['suspicious']}")
-                            
+                            if vt_data['malicious'] > 0: st.error(f"**{vt_data['malicious']} / {vt_data['total_engines']}** Engines flagged")
+                            else: st.success("Clean Result")
                     with res_col2:
                         st.info("👽 **AlienVault OTX**")
-                        if "error" in otx_data:
-                            if "skipped" in otx_data["error"]:
-                                st.write("*(OTX domain check disabled)*")
-                            else:
-                                st.error(otx_data["error"])
-                        else:
-                            st.metric("Associated Pulses", otx_data["pulses"])
-                            st.write(f"**Origin:** {otx_data['country']}")
-                            
+                        if "error" in otx_data: st.write("IP Search Only")
+                        else: st.metric("Pulses", otx_data["pulses"]); st.write(f"Origin: {otx_data['country']}")
                     with res_col3:
-                        st.info("🌐 **Registration / Routing**")
-                        if "error" in whois_data:
-                            st.warning(whois_data["error"])
+                        st.info("🌐 **WHOIS / Routing**")
+                        if "error" in whois_data: st.warning("Lookup failed")
                         else:
-                            if whois_data["type"] == "Domain":
-                                st.write(f"**Registrar:** {whois_data['registrar']}")
-                                st.write(f"**Registered:** {whois_data['creation_date'][:10] if whois_data['creation_date'] else 'Unknown'}")
-                                st.write(f"**Country:** {whois_data['country']}")
-                            else:
-                                st.write(f"**ISP / Org:** {whois_data['org']}")
-                                st.write(f"**Country:** {whois_data['country']}")
-                                st.write(f"**IP Block:** `{whois_data['ip_block']}`")
+                            if whois_data["type"] == "Domain": st.write(f"**Registrar:** {whois_data['registrar']}"); st.write(f"**Reg:** {whois_data['creation_date'][:10]}")
+                            else: st.write(f"**ISP:** {whois_data['org']}"); st.write(f"**Block:** `{whois_data['ip_block']}`")
                                 
                     st.markdown("---")
-                    st.markdown("#### 🇨🇭 Abuse.ch Community Intel")
                     
-                    # --- ROW 2: Specific Community Intel ---
+                    # --- Community Intel ---
                     res_col4, res_col5 = st.columns(2)
-                    
                     with res_col4:
-                        st.info("🌐 **URLhaus (Malware Payload Host)**")
-                        if "error" in urlhaus_data:
-                            st.error(urlhaus_data["error"])
-                        elif urlhaus_data.get("hit"):
-                            st.error(f"⚠️ **Known Malware Host**")
-                            st.write(f"**Historical URLs Hosted:** {urlhaus_data['count']}")
-                            st.write(f"**First Seen:** {urlhaus_data['first_seen']}")
-                        else:
-                            st.success(urlhaus_data["msg"])
-                            
+                        st.info("🌐 **URLhaus**")
+                        if urlhaus_data.get("hit"): st.error(f"⚠️ Malware Host Detected")
+                        else: st.success("No Payload History")
                     with res_col5:
-                        st.info("🦊 **ThreatFox (Command & Control)**")
-                        if "error" in threatfox_data:
-                            st.error(threatfox_data["error"])
-                        elif threatfox_data.get("hit"):
-                            st.error(f"⚠️ **Known C2 Infrastructure**")
-                            st.write(f"**Related IOCs:** {threatfox_data['count']}")
-                            st.write(f"**Associated Malware:** {', '.join(threatfox_data['malware'])}")
-                        else:
-                            st.success(threatfox_data["msg"])
+                        st.info("Fox **ThreatFox**")
+                        if threatfox_data.get("hit"): st.error(f"⚠️ Known C2 Node")
+                        else: st.success("No C2 Activity")
+
+                    st.markdown("---")
+                    
+                    # --- NEW: EXTERNAL PIVOT LINKS ---
+                    st.subheader("🔗 External Intelligence Links")
+                    st.markdown("Click below to open these indicators directly on the source platforms for manual investigation.")
+                    
+                    link_col1, link_col2, link_col3, link_col4 = st.columns(4)
+                    
+                    with link_col1:
+                        # VirusTotal Search Link
+                        vt_search_url = f"https://www.virustotal.com/gui/search/{target_indicator}"
+                        st.link_button("View on VirusTotal ↗", vt_search_url, use_container_width=True)
+                        
+                        # WHOIS Search Link
+                        whois_web_url = f"https://www.whois.com/whois/{target_indicator}"
+                        st.link_button("View on WHOIS.com ↗", whois_web_url, use_container_width=True)
+
+                    with link_col2:
+                        # AlienVault OTX Link (Detect IP vs Domain)
+                        otx_base = "https://otx.alienvault.com/indicator/"
+                        otx_path = f"ip/{target_indicator}" if ind_type == "IP" else f"domain/{target_indicator}"
+                        st.link_button("View on OTX ↗", otx_base + otx_path, use_container_width=True)
+
+                    with link_col3:
+                        # URLhaus Link
+                        urlhaus_web_url = f"https://urlhaus.abuse.ch/host/{target_indicator}/"
+                        st.link_button("View on URLhaus ↗", urlhaus_web_url, use_container_width=True)
+
+                    with link_col4:
+                        # ThreatFox Link (Search Query)
+                        tf_web_url = f"https://threatfox.abuse.ch/browse.php?search=ioc%3A{target_indicator}"
+                        st.link_button("View on ThreatFox ↗", tf_web_url, use_container_width=True)
             else:
-                st.warning("Please enter a valid IP or Domain.")
+                st.warning("Please enter a target first.")
