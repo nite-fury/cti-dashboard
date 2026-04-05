@@ -49,7 +49,6 @@ def fetch_urlhaus():
             df['tags'] = df['tags'].apply(lambda x: ', '.join(x) if isinstance(x, list) else 'none')
             df['Reference URL'] = df.get('urlhaus_reference', df['url'])
             
-            # Geo-location batching
             unique_hosts = df['host'].dropna().unique()[:100].tolist()
             geo_res = requests.post("http://ip-api.com/batch?fields=query,lat,lon,country", json=unique_hosts).json()
             geo_df = pd.DataFrame(geo_res).rename(columns={'query': 'host'})
@@ -142,10 +141,8 @@ def query_virustotal(indicator, ind_type):
     except Exception as e: return {"error": str(e)}
 
 def query_whois(indicator, ind_type):
-    """Fetches Domain WHOIS or IP RDAP (Routing) data"""
     if ind_type == "IP":
         try:
-            # Uses RDAP to fetch accurate IP allocations and CIDR blocks
             obj = IPWhois(indicator)
             res = obj.lookup_rdap()
             return {
@@ -158,7 +155,6 @@ def query_whois(indicator, ind_type):
             return {"error": f"IP WHOIS failed: {str(e)}"}
     else:
         try:
-            # Uses standard WHOIS for domain registrations
             w = whois.whois(indicator)
             return {
                 "type": "Domain",
@@ -180,6 +176,39 @@ def query_otx_ip(ip_address):
             return {"pulses": data.get("pulse_info", {}).get("count", 0), "country": data.get("base_indicator", {}).get("country", "Unknown")}
         return {"error": f"HTTP Status {response.status_code}"}
     except Exception as e: return {"error": str(e)}
+
+# --- NEW: Abuse.ch Enrichment Functions ---
+def query_urlhaus_indicator(indicator):
+    """Checks if a domain/IP is known to host malware payloads"""
+    url = "https://urlhaus-api.abuse.ch/v1/host/"
+    data = {"host": indicator}
+    # URLhaus host endpoint often accepts standard POST form data
+    try:
+        res = requests.post(url, data=data).json()
+        if res.get("query_status") == "ok":
+            urls = res.get("urls", [])
+            return {"hit": True, "count": len(urls), "first_seen": res.get("firstseen", "Unknown")}
+        else:
+            return {"hit": False, "msg": "Clean. No known payload hosting."}
+    except Exception as e:
+        return {"error": str(e)}
+
+def query_threatfox_indicator(indicator):
+    """Checks if a domain/IP is a known Command & Control (C2) node"""
+    url = "https://threatfox-api.abuse.ch/api/v1/"
+    headers = {"Auth-Key": THREATFOX_KEY} if THREATFOX_KEY else {}
+    payload = {"query": "search_ioc", "search_term": indicator}
+    try:
+        res = requests.post(url, json=payload, headers=headers).json()
+        if res.get("query_status") == "ok":
+            data = res.get("data", [])
+            # Extract unique malware family names associated with this indicator
+            malware = list(set([item.get("malware_printable", "Unknown") for item in data]))
+            return {"hit": True, "count": len(data), "malware": malware}
+        else:
+            return {"hit": False, "msg": "Clean. No known C2 activity."}
+    except Exception as e:
+        return {"error": str(e)}
 
 # ==========================================
 # --- SIDEBAR NAVIGATION & SETTINGS ---
@@ -283,7 +312,7 @@ elif page == "🚨 Strategic Intel (CISA & APTs)":
 # --- PAGE 4: MULTI-SOURCE ENRICHMENT ---
 elif page == "🔬 Multi-Source Enrichment":
     st.title("🔬 Multi-Source Indicator Enrichment")
-    st.markdown("Simultaneously query VirusTotal, AlienVault OTX, and WHOIS records.")
+    st.markdown("Simultaneously query VirusTotal, AlienVault, WHOIS, URLhaus, and ThreatFox.")
     
     col_left, col_mid, col_right = st.columns([1, 2, 1])
     with col_mid:
@@ -297,10 +326,14 @@ elif page == "🔬 Multi-Source Enrichment":
                 st.success(f"Scanning **{ind_type}**: {target_indicator}")
                 
                 with st.spinner('Querying Threat Intel Sources...'):
+                    # Fetching from all 5 sources
                     vt_data = query_virustotal(target_indicator, ind_type)
                     otx_data = query_otx_ip(target_indicator) if ind_type == "IP" else {"error": "OTX IP check skipped for domain."}
                     whois_data = query_whois(target_indicator, ind_type)
+                    urlhaus_data = query_urlhaus_indicator(target_indicator)
+                    threatfox_data = query_threatfox_indicator(target_indicator)
                     
+                    # --- ROW 1: Broad Intelligence ---
                     res_col1, res_col2, res_col3 = st.columns(3)
                     
                     with res_col1:
@@ -310,7 +343,7 @@ elif page == "🔬 Multi-Source Enrichment":
                         else:
                             mal_count = vt_data['malicious']
                             if mal_count > 0:
-                                st.error(f"**{mal_count} / {vt_data['total_engines']}** Engines flagged as Malicious")
+                                st.error(f"**{mal_count} / {vt_data['total_engines']}** Engines flagged")
                             else:
                                 st.success(f"**0 / {vt_data['total_engines']}** Engines flagged. Clean.")
                             st.write(f"Suspicious: {vt_data['suspicious']}")
@@ -319,16 +352,15 @@ elif page == "🔬 Multi-Source Enrichment":
                         st.info("👽 **AlienVault OTX**")
                         if "error" in otx_data:
                             if "skipped" in otx_data["error"]:
-                                st.write("*(Domain search currently requires separate OTX function)*")
+                                st.write("*(OTX domain check disabled)*")
                             else:
                                 st.error(otx_data["error"])
                         else:
                             st.metric("Associated Pulses", otx_data["pulses"])
                             st.write(f"**Origin:** {otx_data['country']}")
                             
-                    # --- WHOIS / ROUTING RESULTS ---
                     with res_col3:
-                        st.info("🌐 **Registration & Routing**")
+                        st.info("🌐 **Registration / Routing**")
                         if "error" in whois_data:
                             st.warning(whois_data["error"])
                         else:
@@ -339,6 +371,34 @@ elif page == "🔬 Multi-Source Enrichment":
                             else:
                                 st.write(f"**ISP / Org:** {whois_data['org']}")
                                 st.write(f"**Country:** {whois_data['country']}")
-                                st.write(f"**IP Block (CIDR):** `{whois_data['ip_block']}`")
+                                st.write(f"**IP Block:** `{whois_data['ip_block']}`")
+                                
+                    st.markdown("---")
+                    st.markdown("#### 🇨🇭 Abuse.ch Community Intel")
+                    
+                    # --- ROW 2: Specific Community Intel ---
+                    res_col4, res_col5 = st.columns(2)
+                    
+                    with res_col4:
+                        st.info("🌐 **URLhaus (Malware Payload Host)**")
+                        if "error" in urlhaus_data:
+                            st.error(urlhaus_data["error"])
+                        elif urlhaus_data.get("hit"):
+                            st.error(f"⚠️ **Known Malware Host**")
+                            st.write(f"**Historical URLs Hosted:** {urlhaus_data['count']}")
+                            st.write(f"**First Seen:** {urlhaus_data['first_seen']}")
+                        else:
+                            st.success(urlhaus_data["msg"])
+                            
+                    with res_col5:
+                        st.info("🦊 **ThreatFox (Command & Control)**")
+                        if "error" in threatfox_data:
+                            st.error(threatfox_data["error"])
+                        elif threatfox_data.get("hit"):
+                            st.error(f"⚠️ **Known C2 Infrastructure**")
+                            st.write(f"**Related IOCs:** {threatfox_data['count']}")
+                            st.write(f"**Associated Malware:** {', '.join(threatfox_data['malware'])}")
+                        else:
+                            st.success(threatfox_data["msg"])
             else:
                 st.warning("Please enter a valid IP or Domain.")
