@@ -287,7 +287,7 @@ elif page == "🔬 Multi-Source Enrichment":
                 
                 with st.spinner('Gathering Intelligence...'):
                     vt_data = query_virustotal(target_indicator, ind_type)
-                    ot_data = query_otx_ip(target_indicator) if ind_type == "IP" else {"error": "Skipped"}
+                    otx_data = query_otx_ip(target_indicator) if ind_type == "IP" else {"error": "Skipped"}
                     whois_data = query_whois(target_indicator, ind_type)
                     urlhaus_data = query_urlhaus_indicator(target_indicator)
                     threatfox_data = query_threatfox_indicator(target_indicator)
@@ -326,34 +326,29 @@ elif page == "🔬 Multi-Source Enrichment":
 
                     st.markdown("---")
                     
-                    # --- NEW: EXTERNAL PIVOT LINKS ---
+                    # --- EXTERNAL PIVOT LINKS ---
                     st.subheader("🔗 External Intelligence Links")
                     st.markdown("Click below to open these indicators directly on the source platforms for manual investigation.")
                     
                     link_col1, link_col2, link_col3, link_col4 = st.columns(4)
                     
                     with link_col1:
-                        # VirusTotal Search Link
                         vt_search_url = f"https://www.virustotal.com/gui/search/{target_indicator}"
                         st.link_button("View on VirusTotal ↗", vt_search_url, use_container_width=True)
                         
-                        # WHOIS Search Link
                         whois_web_url = f"https://www.whois.com/whois/{target_indicator}"
                         st.link_button("View on WHOIS.com ↗", whois_web_url, use_container_width=True)
 
                     with link_col2:
-                        # AlienVault OTX Link (Detect IP vs Domain)
                         otx_base = "https://otx.alienvault.com/indicator/"
                         otx_path = f"ip/{target_indicator}" if ind_type == "IP" else f"domain/{target_indicator}"
                         st.link_button("View on OTX ↗", otx_base + otx_path, use_container_width=True)
 
                     with link_col3:
-                        # URLhaus Link
                         urlhaus_web_url = f"https://urlhaus.abuse.ch/host/{target_indicator}/"
                         st.link_button("View on URLhaus ↗", urlhaus_web_url, use_container_width=True)
 
                     with link_col4:
-                        # ThreatFox Link (Search Query)
                         tf_web_url = f"https://threatfox.abuse.ch/browse.php?search=ioc%3A{target_indicator}"
                         st.link_button("View on ThreatFox ↗", tf_web_url, use_container_width=True)
             else:
