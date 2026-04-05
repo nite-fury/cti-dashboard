@@ -4,3 +4,4 @@ requests
 plotly
 streamlit-autorefresh
 python-whois
+ipwhois
