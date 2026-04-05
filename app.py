@@ -19,24 +19,16 @@ refresh_interval = st.sidebar.selectbox(
     options=[5, 10, 30, 60],
     format_func=lambda x: f"Every {x} Minutes"
 )
-
-# Initialize the autorefresh (converts minutes to milliseconds)
 count = st_autorefresh(interval=refresh_interval * 60 * 1000, key="ctirefresh")
 
 # --- DATA FETCHING FUNCTIONS ---
 @st.cache_data(ttl=3600)
 def fetch_cisa_with_severity():
-    """Fetches CISA KEV and attempts to map severity scores."""
     url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     try:
         res = requests.get(url).json()
         df = pd.DataFrame(res["vulnerabilities"])
-        
-        # Note: In a production environment, you would use a local CVE database 
-        # to avoid hitting NIST rate limits. For this prototype, we'll tag 
-        # them as 'High/Critical' since they are in the KEV (Known Exploited).
         df['Severity'] = "CRITICAL (Exploited)"
-        
         df['dateAdded'] = pd.to_datetime(df['dateAdded']).dt.strftime('%Y-%m-%d')
         return df.sort_values(by='dateAdded', ascending=False)
     except: pass
@@ -51,7 +43,6 @@ def fetch_urlhaus():
         if res.get("query_status") == "ok":
             df = pd.DataFrame(res["urls"])
             df['tags'] = df['tags'].apply(lambda x: ', '.join(x) if isinstance(x, list) else 'none')
-            # Geo-batching
             unique_hosts = df['host'].dropna().unique()[:100].tolist()
             geo_res = requests.post("http://ip-api.com/batch?fields=query,lat,lon,country", json=unique_hosts).json()
             geo_df = pd.DataFrame(geo_res).rename(columns={'query': 'host'})
@@ -70,6 +61,38 @@ def fetch_threatfox():
     except: pass
     return pd.DataFrame()
 
+@st.cache_data(ttl=300)
+def fetch_apt_pulses(search_term="APT"):
+    """Fetches the latest threat intelligence pulses matching an APT search"""
+    if not OTX_KEY: return pd.DataFrame()
+    # Query OTX for the latest pulses modified containing the search term
+    url = f"https://otx.alienvault.com/api/v1/search/pulses?q={search_term}&sort=-modified&limit=15"
+    headers = {"X-OTX-API-KEY": OTX_KEY}
+    try:
+        res = requests.get(url, headers=headers).json()
+        if "results" in res and res["results"]:
+            df = pd.DataFrame(res["results"])
+            df['Date'] = pd.to_datetime(df['modified']).dt.strftime('%Y-%m-%d')
+            df['Tags'] = df['tags'].apply(lambda x: ', '.join(x[:5]) if isinstance(x, list) else 'none')
+            # Rename columns for the UI
+            df = df.rename(columns={'name': 'Campaign / Report', 'author_name': 'Reporter', 'indicator_count': 'IOCs'})
+            return df[['Date', 'Campaign / Report', 'Reporter', 'IOCs', 'Tags']]
+    except Exception as e: 
+        print(e)
+    return pd.DataFrame()
+
+def query_otx_ip(ip_address):
+    if not OTX_KEY: return {"error": "AlienVault API Key missing in secrets"}
+    url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip_address}/general"
+    headers = {"X-OTX-API-KEY": OTX_KEY}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return {"pulses": data.get("pulse_info", {}).get("count", 0), "country": data.get("base_indicator", {}).get("country", "Unknown")}
+        return {"error": f"HTTP Status {response.status_code}"}
+    except Exception as e: return {"error": str(e)}
+
 # ==========================================
 # --- DASHBOARD LAYOUT ---
 # ==========================================
@@ -77,16 +100,24 @@ def fetch_threatfox():
 # Sidebar OTX Tool
 with st.sidebar:
     st.markdown("---")
-    st.subheader("🔍 AlienVault OTX Search")
+    st.subheader("🔍 IP Investigation")
     target_ip = st.text_input("Enter IPv4 Address:")
     if st.button("Investigate IP"):
-        # (OTX Query logic remains same as previous version)
-        pass
+        if target_ip:
+            with st.spinner('Querying OTX...'):
+                otx_data = query_otx_ip(target_ip)
+                if "error" in otx_data: 
+                    st.error(otx_data["error"])
+                else:
+                    st.success("Target Analyzed")
+                    st.metric("Associated Threat Pulses", otx_data["pulses"])
+                    st.write(f"**Origin Country:** {otx_data['country']}")
 
 # Main Dashboard Header
 st.title("🛡️ SOC Master Dashboard")
 st.caption(f"Last Refresh: {pd.Timestamp.now().strftime('%H:%M:%S')} (Interval: {refresh_interval}m)")
 
+# --- TOP ROW: TACTICAL INTEL ---
 col1, col2 = st.columns(2)
 
 with col1:
@@ -104,12 +135,25 @@ with col2:
 
 st.markdown("---")
 
-# --- ENHANCED CISA SECTION ---
-st.subheader("🚨 CISA: Known Exploited Vulnerabilities")
-df_cisa = fetch_cisa_with_severity()
-if not df_cisa.empty:
-    # We now include the 'Severity' column we created
-    st.dataframe(
-        df_cisa[['dateAdded', 'cveID', 'vulnerabilityName', 'Severity', 'requiredAction']].head(15), 
-        use_container_width=True
-    )
+# --- BOTTOM ROW: STRATEGIC INTEL ---
+col3, col4 = st.columns(2)
+
+with col3:
+    st.subheader("🚨 Actively Exploited CVEs (CISA)")
+    df_cisa = fetch_cisa_with_severity()
+    if not df_cisa.empty:
+        st.dataframe(
+            df_cisa[['dateAdded', 'cveID', 'vulnerabilityName', 'Severity']].head(15), 
+            use_container_width=True
+        )
+
+with col4:
+    st.subheader("🥷 APT Intel & Campaign Tracker")
+    # Live Search Bar for APTs
+    apt_search = st.text_input("Search Actor, Campaign, or Region:", value="APT", placeholder="e.g., Lazarus, Cozy Bear, APT29...")
+    
+    df_apt = fetch_apt_pulses(apt_search)
+    if not df_apt.empty:
+        st.dataframe(df_apt, use_container_width=True)
+    else:
+        st.info(f"No recent reports found for '{apt_search}'. Check your OTX API key.")
