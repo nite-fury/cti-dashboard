@@ -23,6 +23,7 @@ THREATFOX_KEY = st.secrets.get("THREATFOX_KEY", "")
 URLHAUS_KEY = st.secrets.get("URLHAUS_KEY", "")
 VT_KEY = st.secrets.get("VT_API_KEY", "")
 URLSCAN_KEY = st.secrets.get("URLSCAN_KEY", "")
+ABUSEIPDB_KEY = st.secrets.get("ABUSEIPDB_KEY", "")
 
 # ==========================================
 # --- DATA FETCHING FUNCTIONS ---
@@ -198,6 +199,31 @@ def query_otx_indicator(indicator, ind_type):
         return {"error": f"HTTP {response.status_code}"}
     except Exception as e: return {"error": str(e)}
 
+def query_abuseipdb(indicator, ind_type):
+    if ind_type != "IP":
+        return {"error": "AbuseIPDB only scans IPs."}
+    if not ABUSEIPDB_KEY:
+        return {"error": "AbuseIPDB API Key missing"}
+    
+    url = "https://api.abuseipdb.com/api/v2/check"
+    querystring = {"ipAddress": indicator, "maxAgeInDays": "90"}
+    headers = {"Accept": "application/json", "Key": ABUSEIPDB_KEY}
+    
+    try:
+        response = requests.get(url, headers=headers, params=querystring)
+        if response.status_code == 200:
+            data = response.json()["data"]
+            return {
+                "hit": data.get("abuseConfidenceScore", 0) > 0,
+                "score": data.get("abuseConfidenceScore", 0),
+                "reports": data.get("totalReports", 0)
+            }
+        elif response.status_code == 429:
+            return {"error": "Rate Limited"}
+        else:
+            return {"error": f"HTTP {response.status_code}"}
+    except Exception as e: return {"error": str(e)}
+
 def query_urlhaus_indicator(indicator, ind_type):
     try:
         if ind_type == "HASH":
@@ -232,7 +258,6 @@ def query_urlscan_indicator(indicator, ind_type):
         return {"error": "urlscan.io is for URLs and IPs, not Hashes."}
         
     headers = {"API-Key": URLSCAN_KEY} if URLSCAN_KEY else {}
-    
     if ind_type == "IP":
         q = f"ip:\"{indicator}\""
     else:
@@ -273,6 +298,34 @@ with st.sidebar:
         ["🌐 Global Telemetry (URLhaus)", "🦊 C2 Infrastructure (ThreatFox)", "🚨 Strategic Intel (CISA & APTs)", "🔬 Multi-Source Enrichment"]
     )
     
+    st.markdown("---")
+    
+    # --- NEW: PERSISTENT SIDEBAR LOOKUP ---
+    st.subheader("⚡ Quick IP Lookup")
+    quick_ip = st.text_input("Enter IPv4 Address:", placeholder="e.g., 8.8.8.8", key="quick_ip_input", label_visibility="collapsed")
+    if st.button("Check IP", use_container_width=True):
+        if quick_ip:
+            ind_type = check_indicator_type(quick_ip)
+            if ind_type == "IP":
+                with st.spinner("Checking..."):
+                    ab_data = query_abuseipdb(quick_ip, ind_type)
+                    ox_data = query_otx_indicator(quick_ip, ind_type)
+                    
+                    # Output AbuseIPDB Score
+                    if "error" not in ab_data:
+                        color = "red" if ab_data['score'] > 0 else "green"
+                        st.markdown(f"🛡️ **AbuseIPDB:** :{color}[**{ab_data['score']}%** Score] ({ab_data['reports']} reports)")
+                    else:
+                        st.markdown(f"🛡️ **AbuseIPDB:** {ab_data['error']}")
+
+                    # Output AlienVault Pulses
+                    if "error" not in ox_data:
+                        st.markdown(f"👽 **AlienVault:** **{ox_data['pulses']}** Pulses")
+                    else:
+                        st.markdown(f"👽 **AlienVault:** {ox_data['error']}")
+            else:
+                st.warning("Please enter a valid IP.")
+                
     st.markdown("---")
     st.subheader("⚙️ Settings")
     refresh_interval = st.selectbox("Auto-Refresh Rate:", options=[5, 10, 30, 60], format_func=lambda x: f"Every {x} Minutes")
@@ -329,11 +382,9 @@ elif page == "🚨 Strategic Intel (CISA & APTs)":
 
 elif page == "🔬 Multi-Source Enrichment":
     st.title("🔬 Multi-Source Bulk Enrichment")
-    st.markdown("Query VirusTotal, AlienVault, WHOIS, URLhaus, ThreatFox, and urlscan.io simultaneously.")
+    st.markdown("Query VirusTotal, AlienVault, WHOIS, AbuseIPDB, URLhaus, ThreatFox, and urlscan.io simultaneously.")
     
-    st.markdown("### Target Indicators")
     st.info("💡 **Pro Tip:** Paste IPs, Domains, or Hashes. Max 4 per scan.")
-    
     target_indicators_raw = st.text_area("Enter IOCs (one per line):", placeholder="8.8.8.8\nevil-domain.com\n44d88612fea8a8f36de82e1278abb02f", height=120, label_visibility="collapsed")
     
     if st.button("Run Global Scan", use_container_width=True):
@@ -360,13 +411,16 @@ elif page == "🔬 Multi-Source Enrichment":
                 urlhaus_data = query_urlhaus_indicator(target_indicator, ind_type)
                 threatfox_data = query_threatfox_indicator(target_indicator)
                 urlscan_data = query_urlscan_indicator(target_indicator, ind_type)
+                abuse_data = query_abuseipdb(target_indicator, ind_type)
                 
                 # --- Build Summary Row ---
-                vt_status = f"{vt_data.get('malicious', 0)} / {vt_data.get('total_engines', 0)}" if "error" not in vt_data else vt_data["error"]
+                vt_status = f"{vt_data.get('malicious', 0)}/{vt_data.get('total_engines', 0)}" if "error" not in vt_data else vt_data["error"]
+                abuse_score = f"{abuse_data.get('score', 0)}%" if "error" not in abuse_data else abuse_data["error"]
                 summary_results.append({
                     "Indicator": target_indicator,
                     "Type": ind_type,
                     "VT Malicious": vt_status,
+                    "AbuseIPDB Score": abuse_score,
                     "URLhaus Hit": "Yes" if urlhaus_data.get("hit") else "No",
                     "ThreatFox C2": "Yes" if threatfox_data.get("hit") else "No",
                     "urlscan Record": "Yes" if urlscan_data.get("hit") else "No"
@@ -374,6 +428,7 @@ elif page == "🔬 Multi-Source Enrichment":
 
                 # --- Build Detailed Expander ---
                 with st.expander(f"Deep Dive: {target_indicator} [{ind_type}]", expanded=(len(indicators) == 1)):
+                    # ROW 1: General Intel
                     res_col1, res_col2, res_col3 = st.columns(3)
                     with res_col1:
                         st.info("🦠 **VirusTotal**")
@@ -396,7 +451,8 @@ elif page == "🔬 Multi-Source Enrichment":
                                 
                     st.markdown("---")
                     
-                    res_col4, res_col5 = st.columns(2)
+                    # ROW 2: Community Abuse Intel
+                    res_col4, res_col5, res_col6 = st.columns(3)
                     with res_col4:
                         st.info("🌐 **URLhaus**")
                         if "error" in urlhaus_data: st.error(urlhaus_data["error"])
@@ -407,10 +463,17 @@ elif page == "🔬 Multi-Source Enrichment":
                         if "error" in threatfox_data: st.error(threatfox_data["error"])
                         elif threatfox_data.get("hit"): st.error(f"⚠️ Known Incident Node")
                         else: st.success("No Incident Activity")
+                    with res_col6:
+                        st.info("🛡️ **AbuseIPDB**")
+                        if "error" in abuse_data: st.write(abuse_data["error"])
+                        elif abuse_data.get("hit"): 
+                            st.error(f"⚠️ **{abuse_data['score']}% Confidence Score**")
+                            st.write(f"**Recent Reports:** {abuse_data['reports']}")
+                        else: st.success("0% Abuse Score")
 
                     st.markdown("---")
                     
-                    # --- NEW: VISUAL INTELLIGENCE (urlscan.io) ---
+                    # ROW 3: VISUAL INTELLIGENCE (urlscan.io)
                     st.markdown("#### 📸 Visual Intelligence (urlscan.io)")
                     if "error" in urlscan_data:
                         st.warning(urlscan_data["error"])
@@ -428,33 +491,45 @@ elif page == "🔬 Multi-Source Enrichment":
 
                     st.markdown("---")
                     
-                    # --- External Pivot Links (5 Columns Now) ---
+                    # --- External Pivot Links (2 Rows of 3) ---
                     st.markdown("**🔗 External Intelligence Links**")
-                    link_col1, link_col2, link_col3, link_col4, link_col5 = st.columns(5)
+                    link_r1_c1, link_r1_c2, link_r1_c3 = st.columns(3)
+                    link_r2_c1, link_r2_c2, link_r2_c3 = st.columns(3)
                     
-                    with link_col1:
-                        if ind_type == "HASH": vt_search_url = f"https://www.virustotal.com/gui/file/{target_indicator}"
-                        else: vt_search_url = f"https://www.virustotal.com/gui/search/{target_indicator}"
-                        st.link_button("VirusTotal ↗", vt_search_url, use_container_width=True)
+                    # Row 1 Links
+                    with link_r1_c1:
+                        if ind_type == "HASH": vt_url = f"https://www.virustotal.com/gui/file/{target_indicator}"
+                        else: vt_url = f"https://www.virustotal.com/gui/search/{target_indicator}"
+                        st.link_button("🦠 VirusTotal ↗", vt_url, use_container_width=True)
                         
-                    with link_col2:
+                    with link_r1_c2:
                         otx_path = f"file/{target_indicator}" if ind_type == "HASH" else (f"ip/{target_indicator}" if ind_type == "IP" else f"domain/{target_indicator}")
-                        st.link_button("AlienVault OTX ↗", "https://otx.alienvault.com/indicator/" + otx_path, use_container_width=True)
+                        st.link_button("👽 AlienVault OTX ↗", "https://otx.alienvault.com/indicator/" + otx_path, use_container_width=True)
                         
-                    with link_col3:
-                        if ind_type == "HASH": urlhaus_web_url = f"https://urlhaus.abuse.ch/browse.php?search={target_indicator}"
-                        else: urlhaus_web_url = f"https://urlhaus.abuse.ch/host/{target_indicator}/"
-                        st.link_button("URLhaus ↗", urlhaus_web_url, use_container_width=True)
-                        
-                    with link_col4:
-                        tf_web_url = f"https://threatfox.abuse.ch/browse.php?search=ioc%3A{target_indicator}"
-                        st.link_button("ThreatFox ↗", tf_web_url, use_container_width=True)
-
-                    with link_col5:
-                        if urlscan_data.get("hit"):
-                            st.link_button("urlscan.io Report ↗", urlscan_data["report_url"], use_container_width=True)
+                    with link_r1_c3:
+                        if ind_type == "HASH":
+                            st.link_button("🌐 WHOIS (Not Applicable)", "https://www.whois.com/", use_container_width=True, disabled=True)
                         else:
-                            st.link_button("Search urlscan.io ↗", f"https://urlscan.io/search/#\"{target_indicator}\"", use_container_width=True)
+                            st.link_button("🌐 WHOIS.com ↗", f"https://www.whois.com/whois/{target_indicator}", use_container_width=True)
+
+                    # Row 2 Links
+                    with link_r2_c1:
+                        if ind_type == "HASH": uh_url = f"https://urlhaus.abuse.ch/browse.php?search={target_indicator}"
+                        else: uh_url = f"https://urlhaus.abuse.ch/host/{target_indicator}/"
+                        st.link_button("🌐 URLhaus ↗", uh_url, use_container_width=True)
+                        
+                    with link_r2_c2:
+                        tf_url = f"https://threatfox.abuse.ch/browse.php?search=ioc%3A{target_indicator}"
+                        st.link_button("🦊 ThreatFox ↗", tf_url, use_container_width=True)
+
+                    with link_r2_c3:
+                        if ind_type == "IP":
+                            st.link_button("🛡️ AbuseIPDB ↗", f"https://www.abuseipdb.com/check/{target_indicator}", use_container_width=True)
+                        else:
+                            if urlscan_data.get("hit"):
+                                st.link_button("📸 urlscan.io Report ↗", urlscan_data["report_url"], use_container_width=True)
+                            else:
+                                st.link_button("📸 Search urlscan.io ↗", f"https://urlscan.io/search/#\"{target_indicator}\"", use_container_width=True)
 
                 progress_bar.progress((idx + 1) / len(indicators))
                 if idx < len(indicators) - 1:
